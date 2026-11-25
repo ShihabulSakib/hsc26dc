@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Dhaka College HSC 2026 — Student Results &amp; Rankings</title>
   <meta name="description" content="Dhaka College HSC 2026 Student Results Portal for Science, Humanities, and Business Studies Divisions — Total Marks Ranking, Section Filters, and Academic Transcripts." />
-  <link rel="stylesheet" href="styles.css?v=2.2" />
+  <link rel="stylesheet" href="styles.css?v=2.4" />
 </head>
 <body>
   <!-- Sticky Minimalist Header -->
@@ -132,6 +132,10 @@
             <span class="sec-name">All Sections</span>
             <span class="sec-roll-hint">0001&ndash;0900</span>
           </button>
+          <button type="button" class="section-pill section-pill-updated" data-filter-updated="true" title="Show only students with Re-scrutiny updates">
+            <span class="sec-name">Re-scrutiny</span>
+            <span class="sec-roll-hint">Updates</span>
+          </button>
           <button type="button" class="section-pill" data-section="A" title="Roll 1202425010001 to 1202425010150">
             <span class="sec-name">Section A</span>
             <span class="sec-roll-hint">0001&ndash;0150</span>
@@ -198,6 +202,7 @@
             <select id="statusFilterSelect" class="select-box">
               <option value="with_marks">With Marksheets</option>
               <option value="gpa_5">GPA 5.00 Only</option>
+              <option value="updated">Re-scrutiny Updates</option>
               <option value="all">All Enrolled</option>
             </select>
           </div>
@@ -304,6 +309,6 @@
     </div>
   </footer>
 
-  <script src="app.js?v=2.2"></script>
+  <script src="app.js?v=2.4"></script>
 </body>
 </html>

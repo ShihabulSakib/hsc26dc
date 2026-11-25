@@ -85,10 +85,11 @@
     byRollGlobal: new Map(),
     sectionFilter: "ALL",
     sortBy: "total_marks", // 'total_marks' | 'pcm_percentile' | 'gpa' | 'college_roll'
-    statusFilter: "with_marks", // 'with_marks' | 'gpa_5' | 'all'
+    statusFilter: "with_marks", // 'with_marks' | 'gpa_5' | 'updated' | 'all'
     searchQuery: "",
     currentPage: 1,
     pageSize: defaultPageSize,
+    manifestGeneratedAt: null,
     activeView: "loading", // 'loading' | 'directory' | 'marksheet'
     currentRoll: null,
     savedScrollY: 0,
@@ -167,6 +168,34 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  const UPDATE_LABEL = "Re-scrutiny update";
+
+  function subjectUpdateKey(subject) {
+    const code = cleanSpaces(subject && subject.code);
+    if (code) return `code:${code}`;
+    return `name:${cleanSpaces(subject && subject.subject).toUpperCase()}`;
+  }
+
+  function buildUpdateTooltip(updates) {
+    if (!updates || !updates.has_update) return "";
+    const parts = [];
+    const count = (updates.subject_changes || []).length;
+    if (count > 0) {
+      const names = updates.subject_changes
+        .map((c) => c.subject)
+        .filter(Boolean)
+        .join(", ");
+      parts.push(`${count} subject${count === 1 ? "" : "s"} changed (${names})`);
+    }
+    if (updates.gpa) parts.push(`GPA ${updates.gpa.old} → ${updates.gpa.new}`);
+    if (updates.total_marks) {
+      parts.push(
+        `Total ${updates.total_marks.old} → ${updates.total_marks.new}`
+      );
+    }
+    return `${updates.label || UPDATE_LABEL}: ${parts.join("; ")}`;
   }
 
   function cleanSpaces(text) {
@@ -558,6 +587,7 @@
         chemistry_marks: chemistryMarks,
         math_marks: mathMarks,
         subjects,
+        updates: rec.updates || baseRec.updates || null,
       };
     });
 
@@ -671,8 +701,15 @@
     }
   }
 
+  function withDataVersion(url) {
+    if (!state.manifestGeneratedAt) return url;
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}v=${encodeURIComponent(state.manifestGeneratedAt)}`;
+  }
+
   async function fetchJsonOrJsonl(url, forceNetwork = false) {
-    const targetUrl = forceNetwork ? `${url}?t=${Date.now()}` : url;
+    const sep = url.includes("?") ? "&" : "?";
+    const targetUrl = forceNetwork ? `${url}${sep}t=${Date.now()}` : url;
     const resp = await fetch(targetUrl, {
       cache: forceNetwork ? "no-cache" : "default",
     });
@@ -688,8 +725,11 @@
 
   async function loadManifest(forceNetwork = false) {
     try {
-      const manifest = await fetchJsonOrJsonl(MANIFEST_URL, forceNetwork);
+      // Always revalidate the tiny manifest so cached group JSONs get versioned
+      // against the current build when results are refreshed.
+      const manifest = await fetchJsonOrJsonl(MANIFEST_URL, true);
       if (manifest && Array.isArray(manifest.groups)) {
+        state.manifestGeneratedAt = manifest.generated_at || null;
         for (const g of manifest.groups) {
           if (g.key === "science") {
             els.badgeCountScience.textContent = (g.total_students || 862).toLocaleString();
@@ -730,7 +770,7 @@
     }
 
     try {
-      const raw = await fetchJsonOrJsonl(cfg.dataUrl, forceNetwork);
+      const raw = await fetchJsonOrJsonl(withDataVersion(cfg.dataUrl), forceNetwork);
       if (raw) {
         state.groupsData[groupKey] = normalizeGroupPayload(raw, groupKey);
         for (const s of state.groupsData[groupKey].students) {
@@ -746,7 +786,10 @@
 
     // Fallback: try students_data.json
     try {
-      const combined = await fetchJsonOrJsonl(COMBINED_DATA_URL, forceNetwork);
+      const combined = await fetchJsonOrJsonl(
+        withDataVersion(COMBINED_DATA_URL),
+        forceNetwork
+      );
       if (combined && Array.isArray(combined.students)) {
         const groupStudents = combined.students.filter(
           (s) => s.group_key === groupKey || detectGroupKeyFromRoll(s.college_roll) === groupKey
@@ -997,21 +1040,38 @@
 
   function renderSectionPills(cfg) {
     const sections = cfg.sections || GROUP_CONFIGS.science.sections;
-    els.sectionPillsContainer.innerHTML = sections
-      .map((sec) => {
-        const activeClass = sec.id === state.sectionFilter ? "active" : "";
-        return `<button type="button" class="section-pill ${activeClass}" data-section="${escapeHtml(
-          sec.id
-        )}" title="${escapeHtml(sec.range)}">
-          <span class="sec-name">${escapeHtml(sec.label)}</span>
-          <span class="sec-roll-hint">${escapeHtml(sec.shortHint)}</span>
-        </button>`;
-      })
-      .join("");
+    const updatedCount = state.students.filter(
+      (s) => s.updates && s.updates.has_update
+    ).length;
+    const updatedActive = state.statusFilter === "updated" ? "active" : "";
+    const updatedPillHtml =
+      updatedCount > 0
+        ? `<button type="button" class="section-pill section-pill-updated ${updatedActive}" data-filter-updated="true" title="Show only students with Re-scrutiny updates">
+          <span class="sec-name">Re-scrutiny</span>
+          <span class="sec-roll-hint">${updatedCount} Updated</span>
+        </button>`
+        : "";
+
+    const pills = [];
+    for (const sec of sections) {
+      const activeClass = sec.id === state.sectionFilter ? "active" : "";
+      pills.push(`<button type="button" class="section-pill ${activeClass}" data-section="${escapeHtml(
+        sec.id
+      )}" title="${escapeHtml(sec.range)}">
+        <span class="sec-name">${escapeHtml(sec.label)}</span>
+        <span class="sec-roll-hint">${escapeHtml(sec.shortHint)}</span>
+      </button>`);
+      if (sec.id === "ALL" && updatedPillHtml) {
+        pills.push(updatedPillHtml);
+      }
+    }
+
+    els.sectionPillsContainer.innerHTML = pills.join("");
 
     // Adjust grid columns cleanly based on pill count
-    if (sections.length <= 2) {
-      els.sectionPillsContainer.style.gridTemplateColumns = `repeat(${sections.length}, minmax(140px, 240px))`;
+    const pillCount = pills.length;
+    if (pillCount <= 3) {
+      els.sectionPillsContainer.style.gridTemplateColumns = `repeat(${pillCount}, minmax(140px, 240px))`;
     } else {
       els.sectionPillsContainer.style.gridTemplateColumns = "";
     }
@@ -1138,6 +1198,9 @@
       }
       if (state.statusFilter === "with_marks" && s.total_marks <= 0) return false;
       if (state.statusFilter === "gpa_5" && s.gpa !== "5.00") return false;
+      if (state.statusFilter === "updated" && !(s.updates && s.updates.has_update)) {
+        return false;
+      }
 
       if (!q) return true;
       const nameMatch = s.name.toLowerCase().includes(q);
@@ -1308,7 +1371,24 @@
               }`
             : "";
 
-        return `<tr data-roll="${escapeHtml(
+        let updateChip = "";
+        if (s.updates && s.updates.has_update) {
+          const changeCount = (s.updates.subject_changes || []).length;
+          const chipText =
+            changeCount > 0
+              ? `Re-scrutiny · ${changeCount}`
+              : "Re-scrutiny";
+          updateChip = `<span class="update-chip" title="${escapeHtml(
+            buildUpdateTooltip(s.updates)
+          )}" aria-label="${escapeHtml(
+            buildUpdateTooltip(s.updates)
+          )}">${escapeHtml(chipText)}</span>`;
+        }
+
+        const rowClass =
+          s.updates && s.updates.has_update ? ' class="updated-row"' : "";
+
+        return `<tr${rowClass} data-roll="${escapeHtml(
           s.college_roll
         )}" tabindex="0" role="button" aria-label="View marksheet for ${escapeHtml(
           s.name
@@ -1327,7 +1407,7 @@
           </td>
           <td class="cell-name"><span class="student-name">${escapeHtml(
             s.name
-          )}</span></td>
+          )}</span>${updateChip}</td>
           <td class="cell-roll"><span class="roll-mono">${escapeHtml(
             s.college_roll
           )}</span></td>
@@ -1417,6 +1497,17 @@
         ? ((student.total_marks / 1300) * 100).toFixed(2)
         : "0.00";
 
+    const updates =
+      student.updates && student.updates.has_update ? student.updates : null;
+    const subjectChangesByKey = {};
+    if (updates) {
+      for (const change of updates.subject_changes || []) {
+        subjectChangesByKey[subjectUpdateKey(change)] = change;
+      }
+    }
+    const subjectChangeCount =
+      (updates && updates.subject_changes ? updates.subject_changes.length : 0);
+
     const gpaDisplay = student.gpa
       ? student.gpa
       : student.result === "A"
@@ -1442,6 +1533,7 @@
     if (Array.isArray(student.subjects) && student.subjects.length > 0) {
       subjectsRowsHtml = student.subjects
         .map((sub) => {
+          const change = subjectChangesByKey[subjectUpdateKey(sub)] || null;
           const pct =
             sub.marks > 0 && sub.max_marks
               ? `${((sub.marks / sub.max_marks) * 100).toFixed(1)}%`
@@ -1451,8 +1543,28 @@
             : sub.subject_type
             ? `<span class="pcm-tag">${escapeHtml(sub.subject_type)}</span>`
             : "";
+          const updateTag = change
+            ? `<span class="subject-update-tag">Updated</span>`
+            : "";
 
-          const marksCellText =
+          const gradeChanged =
+            change && change.old_grade !== change.new_grade;
+          const gradePillHtml = `<span class="gpa-pill ${
+            sub.grade === "A+"
+              ? "gpa-max"
+              : sub.grade === "F"
+              ? "gpa-fail"
+              : ""
+          }">${escapeHtml(sub.grade)}</span>`;
+          const gradeCellHtml = gradeChanged
+            ? `<span class="diff-inline"><span class="diff-old">${escapeHtml(
+                change.old_grade || "—"
+              )}</span><span class="diff-arrow">&rarr;</span>${gradePillHtml}</span>`
+            : gradePillHtml;
+
+          const marksChanged =
+            change && change.old_marks !== change.new_marks;
+          const marksBaseHtml =
             sub.marks > 0
               ? `${escapeHtml(sub.marks_display || sub.marks)} <span style="color: var(--text-muted); font-weight: 400; font-size: 0.76rem;">/ ${
                   sub.max_marks
@@ -1460,22 +1572,25 @@
               : `<span style="color: var(--text-muted); font-weight: 400;">${escapeHtml(
                   sub.marks_display || "—"
                 )} (${sub.max_marks})</span>`;
+          const marksCellText = marksChanged
+            ? `<span class="diff-inline"><span class="diff-old">${escapeHtml(
+                change.old_marks || "—"
+              )}</span><span class="diff-arrow">&rarr;</span><span class="diff-new">${marksBaseHtml}</span></span>`
+            : marksBaseHtml;
 
-          return `<tr class="${sub.is_pcm ? "pcm-row" : ""}">
+          const rowClasses = [];
+          if (sub.is_pcm) rowClasses.push("pcm-row");
+          if (change) rowClasses.push("subject-updated-row");
+
+          return `<tr class="${rowClasses.join(" ")}">
             <td style="font-family: var(--font-mono); font-size: 0.81rem; color: var(--text-secondary);">
               ${escapeHtml(sub.code)}
             </td>
             <td style="font-weight: 500;">
-              ${escapeHtml(sub.subject)} ${typeTag}
+              ${escapeHtml(sub.subject)} ${typeTag}${updateTag}
             </td>
             <td class="center-col">
-              <span class="gpa-pill ${
-                sub.grade === "A+"
-                  ? "gpa-max"
-                  : sub.grade === "F"
-                  ? "gpa-fail"
-                  : ""
-              }">${escapeHtml(sub.grade)}</span>
+              ${gradeCellHtml}
             </td>
             <td class="num-col" style="font-family: var(--font-mono); font-weight: 600;">
               ${marksCellText}
@@ -1488,11 +1603,28 @@
         .join("");
 
       if (student.total_marks > 0) {
+        const totalRowGpaHtml =
+          updates && updates.gpa
+            ? `<span class="diff-inline"><span class="diff-old">${escapeHtml(
+                updates.gpa.old || "—"
+              )}</span><span class="diff-arrow">&rarr;</span><span class="diff-new">GPA ${escapeHtml(
+                gpaDisplay
+              )}</span></span>`
+            : `GPA ${escapeHtml(gpaDisplay)}`;
+        const totalRowMarksHtml =
+          updates && updates.total_marks
+            ? `<span class="diff-inline"><span class="diff-old">${escapeHtml(
+                updates.total_marks.old
+              )}</span><span class="diff-arrow">&rarr;</span><span class="diff-new">${
+                student.total_marks
+              }</span></span> <span style="color: var(--text-muted); font-weight: 400; font-size: 0.76rem;">/ 1300</span>`
+            : `${student.total_marks} <span style="color: var(--text-muted); font-weight: 400; font-size: 0.76rem;">/ 1300</span>`;
+
         subjectsRowsHtml += `<tr class="Subjects-total-row">
           <td colspan="2">Total Marks (All 7 Subjects)</td>
-          <td class="center-col">GPA ${escapeHtml(gpaDisplay)}</td>
+          <td class="center-col">${totalRowGpaHtml}</td>
           <td class="num-col" style="font-family: var(--font-mono);">
-            ${student.total_marks} <span style="color: var(--text-muted); font-weight: 400; font-size: 0.76rem;">/ 1300</span>
+            ${totalRowMarksHtml}
           </td>
           <td class="num-col hide-mobile" style="font-family: var(--font-mono);">
             ${overallPercentage}%
@@ -1599,6 +1731,56 @@
       </div>
       `;
 
+    let rescrutinyBannerHtml = "";
+    if (updates) {
+      const summaryParts = [];
+      if (subjectChangeCount > 0) {
+        summaryParts.push(
+          `${subjectChangeCount} subject${
+            subjectChangeCount === 1 ? "" : "s"
+          } changed`
+        );
+      }
+      if (updates.gpa) {
+        summaryParts.push(`GPA ${updates.gpa.old || "—"} → ${updates.gpa.new || "—"}`);
+      }
+      if (updates.total_marks) {
+        summaryParts.push(
+          `Total ${updates.total_marks.old} → ${updates.total_marks.new}`
+        );
+      }
+      rescrutinyBannerHtml = `
+        <div class="rescrutiny-banner" role="status">
+          <span class="rescrutiny-badge">${escapeHtml(
+            updates.label || UPDATE_LABEL
+          )}</span>
+          <span class="rescrutiny-summary">${escapeHtml(
+            summaryParts.join(" • ")
+          )}</span>
+        </div>
+      `;
+    }
+
+    const gpaCardValueHtml =
+      updates && updates.gpa
+        ? `<span class="diff-inline"><span class="diff-old">${escapeHtml(
+            updates.gpa.old || "—"
+          )}</span><span class="diff-arrow">&rarr;</span><span class="diff-new">${escapeHtml(
+            gpaDisplay
+          )}</span></span>`
+        : escapeHtml(gpaDisplay);
+
+    const totalCardValueHtml =
+      student.total_marks > 0
+        ? updates && updates.total_marks
+          ? `<span class="diff-inline"><span class="diff-old">${escapeHtml(
+              updates.total_marks.old
+            )}</span><span class="diff-arrow">&rarr;</span><span class="diff-new">${
+              student.total_marks
+            }</span></span> <span class="sm-denom">/ 1300</span>`
+          : `${student.total_marks} / 1300`
+        : "Pending";
+
     els.marksheetArticle.innerHTML = `
       <div class="sheet-header">
         <div>
@@ -1641,18 +1823,18 @@
         </div>
       </div>
 
+      ${rescrutinyBannerHtml}
+
       <!-- Summary Performance Metrics -->
       <div class="sheet-metrics-grid">
-        <div class="sheet-metric-box">
+        <div class="sheet-metric-box${updates && updates.gpa ? " metric-updated" : ""}">
           <div class="sm-label">Grade Point Average</div>
-          <div class="sm-value">${escapeHtml(gpaDisplay)}</div>
+          <div class="sm-value">${gpaCardValueHtml}</div>
           <div class="sm-sub">Out of 5.00 scale</div>
         </div>
-        <div class="sheet-metric-box highlighted">
+        <div class="sheet-metric-box highlighted${updates && updates.total_marks ? " metric-updated" : ""}">
           <div class="sm-label">Total Marks</div>
-          <div class="sm-value">${
-            student.total_marks > 0 ? `${student.total_marks} / 1300` : "Pending"
-          }</div>
+          <div class="sm-value">${totalCardValueHtml}</div>
           <div class="sm-sub">${escapeHtml(marksRankSub)}</div>
         </div>
         ${thirdAndFourthMetricCards}
@@ -1831,17 +2013,48 @@
       );
     });
 
-    // Section Filter Pills
+    // Section Filter Pills & Re-scrutiny quick filter pill
     els.sectionPillsContainer.addEventListener("click", (e) => {
+      const updatedPill = e.target.closest(
+        ".section-pill[data-filter-updated]"
+      );
+      if (updatedPill) {
+        const hasMarksheets = state.students.some((s) => s.total_marks > 0);
+        const defaultStatus = hasMarksheets ? "with_marks" : "all";
+        state.statusFilter =
+          state.statusFilter === "updated" ? defaultStatus : "updated";
+        els.statusFilterSelect.value = state.statusFilter;
+        state.currentPage = 1;
+        updatedPill.classList.toggle("active", state.statusFilter === "updated");
+        applyFiltersAndRenderTable();
+        return;
+      }
+
       const pill = e.target.closest(".section-pill[data-section]");
       if (!pill) return;
       const sec = pill.getAttribute("data-section");
-      if (!sec || state.sectionFilter === sec) return;
+      if (!sec) return;
+
+      let statusReset = false;
+      if (sec === "ALL" && state.statusFilter === "updated") {
+        const hasMarksheets = state.students.some((s) => s.total_marks > 0);
+        state.statusFilter = hasMarksheets ? "with_marks" : "all";
+        els.statusFilterSelect.value = state.statusFilter;
+        const uPill = els.sectionPillsContainer.querySelector(
+          ".section-pill[data-filter-updated]"
+        );
+        if (uPill) uPill.classList.remove("active");
+        statusReset = true;
+      }
+
+      if (state.sectionFilter === sec && !statusReset) return;
 
       state.sectionFilter = sec;
       state.currentPage = 1;
 
-      const allPills = els.sectionPillsContainer.querySelectorAll(".section-pill");
+      const allPills = els.sectionPillsContainer.querySelectorAll(
+        ".section-pill[data-section]"
+      );
       allPills.forEach((p) => p.classList.toggle("active", p === pill));
 
       renderSummaryCards();
@@ -1882,6 +2095,10 @@
     els.statusFilterSelect.addEventListener("change", (e) => {
       state.statusFilter = e.target.value;
       state.currentPage = 1;
+      const uPill = els.sectionPillsContainer.querySelector(
+        ".section-pill[data-filter-updated]"
+      );
+      if (uPill) uPill.classList.toggle("active", state.statusFilter === "updated");
       applyFiltersAndRenderTable();
     });
 
